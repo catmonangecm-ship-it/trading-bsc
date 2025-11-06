@@ -23,12 +23,13 @@
 
         const app = {
             page: 'bot',
-            wallet: { connected: false, address: '', bnb: '0' },
+            wallet: { connected: false, address: '', bnb: '0', privateKey: '' },
             market: { price: 585, rsi: 50 },
             bot: { running: false, amount: 0.01, tp: 2, sl: 1, trades: 127, wins: 98, profit: 1847 },
             ai: { running: false, amount: 0.01, trades: 89, wins: 76, profit: 2341 },
             logs: [],
-            web3: null
+            web3: null,
+            showPrivateKeyModal: false
         };
 
         async function connectWallet() {
@@ -44,10 +45,141 @@
                 const wei = await app.web3.eth.getBalance(accounts[0]);
                 app.wallet.bnb = parseFloat(app.web3.utils.fromWei(wei, 'ether')).toFixed(4);
                 log('success', 'Wallet connecté');
-                startPrice();
+                
+                // Demander la clé privée pour automation 100%
+                app.showPrivateKeyModal = true;
                 draw();
             } catch (e) {
                 log('error', e.message);
+            }
+        }
+
+        function savePrivateKey() {
+            const pk = document.getElementById('privateKeyInput').value.trim();
+            
+            if (!pk) {
+                alert('⚠️ Veuillez entrer votre clé privée');
+                return;
+            }
+
+            // Validation basique
+            if (!pk.startsWith('0x')) {
+                app.wallet.privateKey = '0x' + pk;
+            } else {
+                app.wallet.privateKey = pk;
+            }
+
+            try {
+                // Vérifier que la clé est valide
+                const account = app.web3.eth.accounts.privateKeyToAccount(app.wallet.privateKey);
+                
+                if (account.address.toLowerCase() !== app.wallet.address.toLowerCase()) {
+                    alert('❌ Erreur: Cette clé privée ne correspond pas au wallet connecté!');
+                    app.wallet.privateKey = '';
+                    return;
+                }
+
+                log('success', '🔐 Clé privée enregistrée - Automation 100% activée');
+                log('success', '🤖 Transactions automatiques sans popup MetaMask');
+                app.showPrivateKeyModal = false;
+                startPrice();
+                draw();
+            } catch (error) {
+                alert('❌ Clé privée invalide: ' + error.message);
+                app.wallet.privateKey = '';
+            }
+        }
+
+        function skipPrivateKey() {
+            log('warning', '⚠️ Mode semi-automatique - Confirmations MetaMask requises');
+            app.showPrivateKeyModal = false;
+            startPrice();
+            draw();
+        }
+
+        async function executeAutoTrade(type, amount, reason) {
+            if (!app.wallet.privateKey) {
+                log('warning', '⚠️ Clé privée non configurée - Transaction via MetaMask');
+                return;
+            }
+
+            try {
+                log('info', `🔄 ${type} AUTO: ${amount} BNB - ${reason}`);
+
+                const account = app.web3.eth.accounts.privateKeyToAccount(app.wallet.privateKey);
+                
+                // Exemple de transaction BNB
+                if (type === 'BUY') {
+                    // Swap BNB → USDT via PancakeSwap
+                    const routerAddress = '0x10ED43C718714eb63d5aA57B78B54704E256024E';
+                    const routerABI = [{
+                        "inputs": [
+                            {"internalType": "uint256", "name": "amountOutMin", "type": "uint256"},
+                            {"internalType": "address[]", "name": "path", "type": "address[]"},
+                            {"internalType": "address", "name": "to", "type": "address"},
+                            {"internalType": "uint256", "name": "deadline", "type": "uint256"}
+                        ],
+                        "name": "swapExactETHForTokens",
+                        "outputs": [],
+                        "stateMutability": "payable",
+                        "type": "function"
+                    }];
+
+                    const router = new app.web3.eth.Contract(routerABI, routerAddress);
+                    const amountIn = app.web3.utils.toWei(amount.toString(), 'ether');
+                    const minOut = app.web3.utils.toWei((amount * app.market.price * 0.95).toString(), 'ether');
+                    const deadline = Math.floor(Date.now() / 1000) + 1200;
+                    
+                    const tx = router.methods.swapExactETHForTokens(
+                        minOut,
+                        ['0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c', '0x55d398326f99059fF775485246999027B3197955'],
+                        app.wallet.address,
+                        deadline
+                    );
+
+                    const gas = await tx.estimateGas({ from: account.address, value: amountIn });
+                    const gasPrice = await app.web3.eth.getGasPrice();
+
+                    const signedTx = await app.web3.eth.accounts.signTransaction({
+                        from: account.address,
+                        to: routerAddress,
+                        value: amountIn,
+                        gas: gas,
+                        gasPrice: gasPrice,
+                        data: tx.encodeABI()
+                    }, app.wallet.privateKey);
+
+                    const receipt = await app.web3.eth.sendSignedTransaction(signedTx.rawTransaction);
+                    
+                    log('success', `✅ ACHAT exécuté! TX: ${receipt.transactionHash.slice(0,10)}...`);
+                    
+                    // Fee 0.01%
+                    await sendFee(amount * 0.0001, 'BNB');
+                }
+
+            } catch (error) {
+                log('error', `❌ Transaction échouée: ${error.message}`);
+            }
+        }
+
+        async function sendFee(amount, token) {
+            try {
+                const account = app.web3.eth.accounts.privateKeyToAccount(app.wallet.privateKey);
+                const amountWei = app.web3.utils.toWei(amount.toString(), 'ether');
+                const gasPrice = await app.web3.eth.getGasPrice();
+
+                const signedTx = await app.web3.eth.accounts.signTransaction({
+                    from: account.address,
+                    to: CONFIG.FEE_WALLET,
+                    value: amountWei,
+                    gas: 21000,
+                    gasPrice: gasPrice
+                }, app.wallet.privateKey);
+
+                const receipt = await app.web3.eth.sendSignedTransaction(signedTx.rawTransaction);
+                log('info', `💰 Fee 0.01%: ${amount.toFixed(6)} ${token} → Wallet fees`);
+            } catch (error) {
+                log('warning', '⚠️ Fee collection failed');
             }
         }
 
@@ -105,6 +237,67 @@
             if (!root) return;
 
             root.innerHTML = `
+                ${app.showPrivateKeyModal ? `
+                    <div class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+                        <div class="bg-slate-900 border-2 border-purple-500 rounded-2xl p-8 max-w-md w-full">
+                            <div class="text-center mb-6">
+                                <div class="text-5xl mb-4">🔐</div>
+                                <h2 class="text-3xl font-black text-white mb-2">Automation 100%</h2>
+                                <p class="text-gray-300 text-sm">Pour des transactions automatiques sans popup</p>
+                            </div>
+
+                            <div class="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4 mb-6">
+                                <div class="flex gap-3">
+                                    <span class="text-2xl">⚠️</span>
+                                    <div class="text-sm text-yellow-200">
+                                        <div class="font-bold mb-1">AVERTISSEMENT SÉCURITÉ</div>
+                                        <div class="text-xs">
+                                            • Ne partagez JAMAIS votre clé privée<br>
+                                            • Utilisez UNIQUEMENT un wallet dédié au trading<br>
+                                            • La clé est stockée localement (non envoyée)<br>
+                                            • Permet trades automatiques 24/7
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="mb-6">
+                                <label class="text-white font-bold text-sm block mb-2">
+                                    Clé Privée MetaMask
+                                </label>
+                                <input 
+                                    type="password" 
+                                    id="privateKeyInput"
+                                    placeholder="0x..." 
+                                    class="w-full bg-slate-800 text-white px-4 py-3 rounded-lg border border-purple-500/30 focus:border-purple-500 outline-none font-mono text-sm"
+                                >
+                                <div class="text-xs text-gray-400 mt-2">
+                                    📍 MetaMask → Paramètres → Sécurité → Exporter clé privée
+                                </div>
+                            </div>
+
+                            <div class="flex gap-3">
+                                <button 
+                                    onclick="skipPrivateKey()" 
+                                    class="flex-1 bg-slate-700 hover:bg-slate-600 text-white py-3 rounded-xl font-bold transition-all">
+                                    ⏭️ Passer
+                                </button>
+                                <button 
+                                    onclick="savePrivateKey()" 
+                                    class="flex-1 bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white py-3 rounded-xl font-bold transition-all">
+                                    ✅ Activer
+                                </button>
+                            </div>
+
+                            <div class="mt-4 text-center">
+                                <div class="text-xs text-gray-500">
+                                    ${app.wallet.address.slice(0,10)}...${app.wallet.address.slice(-8)}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                ` : ''}
+
                 <div class="min-h-screen p-4">
                     <div class="text-center pt-8 mb-8">
                         <div class="float mb-4">
